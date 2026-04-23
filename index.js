@@ -6,7 +6,7 @@ const app = express();
 app.use(express.json());
 
 // =======================
-// LINE WORKS トークン
+// LINE WORKS トークン取得
 // =======================
 async function getAccessToken() {
   const now = Math.floor(Date.now() / 1000);
@@ -42,10 +42,9 @@ async function getAccessToken() {
 // =======================
 async function sendMessage(text) {
   const token = await getAccessToken();
-  const channelId = process.env.LW_TARGET_CHANNEL_ID;
 
   await axios.post(
-    `https://www.worksapis.com/v1.0/bots/${process.env.LW_BOT_ID}/channels/${channelId}/messages`,
+    `https://www.worksapis.com/v1.0/bots/${process.env.LW_BOT_ID}/channels/${process.env.LW_TARGET_CHANNEL_ID}/messages`,
     {
       content: { type: "text", text }
     },
@@ -73,92 +72,7 @@ async function getImageUrl(fileId) {
 }
 
 // =======================
-// ChatGPT
-// =======================
-async function analyzeBusinessCard(imageUrl) {
-  const response = await axios.post(
-    "https://api.openai.com/v1/responses",
-    {
-      model: "gpt-4.1-mini",
-      input: [
-        {
-          role: "user",
-          content: [
-            { type: "input_text", text: "名刺をJSON化して" },
-            { type: "input_image", image_url: imageUrl }
-          ]
-        }
-      ]
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
-      }
-    }
-  );
-
-  return JSON.parse(response.data.output[0].content[0].text);
-}
-
-// =======================
-// kintone登録
-// =======================
-async function registerBusinessCard(data) {
-  const url = `https://${process.env.KINTONE_SUBDOMAIN}.cybozu.com/k/v1/record.json`;
-
-  await axios.post(
-    url,
-    {
-      app: process.env.KINTONE_APP_ID,
-      record: {
-        name: { value: data.name || "" },
-        company: { value: data.company || "" },
-        department: { value: data.department || "" },
-        position: { value: data.position || "" },
-        phone: { value: data.phone || "" },
-        mobile: { value: data.mobile || "" },
-        email: { value: data.email || "" },
-        address: { value: data.address || "" },
-        memo: { value: data.memo || "" }
-      }
-    },
-    {
-      headers: {
-        "X-Cybozu-API-Token": process.env.KINTONE_API_TOKEN
-      }
-    }
-  );
-}
-
-// =======================
-// Webhook
-// =======================
-app.post('/', async (req, res) => {
-  res.sendStatus(200);
-
-  try {
-    if (req.body.type !== "message") return;
-    if (req.body.content?.type !== "image") return;
-
-    const fileId = req.body.content.fileId;
-
-    const imageUrl = await getImageUrl(fileId);
-    const data = await analyzeBusinessCard(imageUrl);
-
-    await registerBusinessCard(data);
-
-    // 🔥 成功通知
-    await sendMessage(`名刺登録しました：${data.name || "名前不明"}`);
-
-  } catch (e) {
-    console.error(e.message);
-    await sendMessage("❌ 名刺登録に失敗しました");
-  }
-});
-
-app.listen(process.env.PORT || 10000, () => {
-  console.log("🚀 Server started");
-});// ChatGPT OCR
+// ChatGPT OCR
 // =======================
 async function analyzeBusinessCard(imageUrl) {
   const response = await axios.post(
@@ -187,8 +101,7 @@ async function analyzeBusinessCard(imageUrl) {
     },
     {
       headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
       }
     }
   );
@@ -230,7 +143,7 @@ async function registerBusinessCard(data) {
 }
 
 // =======================
-// Webhook受信
+// Webhook
 // =======================
 app.post('/', async (req, res) => {
   res.sendStatus(200);
@@ -239,30 +152,27 @@ app.post('/', async (req, res) => {
     console.log("📩 受信:", JSON.stringify(req.body));
 
     if (req.body.type !== "message") return;
-
-    if (req.body.content?.type !== "image") {
-      console.log("⏭ 画像以外スキップ");
-      return;
-    }
+    if (req.body.content?.type !== "image") return;
 
     const fileId = req.body.content.fileId;
 
-    // 画像取得
     const imageUrl = await getImageUrl(fileId);
-
-    // OCR解析
     const data = await analyzeBusinessCard(imageUrl);
 
     console.log("🧠 解析結果:", data);
 
-    // kintone登録
     await registerBusinessCard(data);
+
+    await sendMessage(`✅ 名刺登録しました：${data.name || "名前不明"}`);
 
   } catch (e) {
     console.error("❌ エラー:", e.response?.data || e.message);
+    await sendMessage("❌ 名刺登録に失敗しました");
   }
 });
 
+// =======================
+// サーバー起動（1つだけ！）
 // =======================
 app.get('/', (req, res) => {
   res.send("名刺管理くん稼働中");
