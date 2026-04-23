@@ -1,40 +1,67 @@
 const express = require('express');
 const axios = require('axios');
+const jwt = require('jsonwebtoken');
 
 const app = express();
 app.use(express.json());
 
-// ===== kintone登録 =====
-async function registerBusinessCard(data) {
-  const url = `https://${process.env.KINTONE_SUBDOMAIN}.cybozu.com/k/v1/record.json`;
+// =======================
+// LINE WORKS アクセストークン取得
+// =======================
+async function getAccessToken() {
+  const now = Math.floor(Date.now() / 1000);
 
-  await axios.post(
-    url,
-    {
-      app: process.env.KINTONE_APP_ID,
-      record: {
-        name: { value: data.name || "" },
-        company: { value: data.company || "" },
-        department: { value: data.department || "" },
-        position: { value: data.position || "" },
-        phone: { value: data.phone || "" },
-        mobile: { value: data.mobile || "" },
-        email: { value: data.email || "" },
-        address: { value: data.address || "" },
-        memo: { value: data.memo || "" }
-      }
-    },
+  const privateKey = process.env.LW_PRIVATE_KEY
+    .replace(/\\n/g, '\n');
+
+  const payload = {
+    iss: process.env.LW_CLIENT_ID,
+    sub: process.env.LW_SERVICE_ACCOUNT,
+    iat: now,
+    exp: now + 300
+  };
+
+  const assertion = jwt.sign(payload, privateKey, {
+    algorithm: 'RS256'
+  });
+
+  const params = new URLSearchParams();
+  params.append('grant_type', 'urn:ietf:params:oauth:grant-type:jwt-bearer');
+  params.append('client_id', process.env.LW_CLIENT_ID);
+  params.append('client_secret', process.env.LW_CLIENT_SECRET);
+  params.append('assertion', assertion);
+  params.append('scope', 'bot');
+
+  const res = await axios.post(
+    'https://auth.worksmobile.com/oauth2/v2.0/token',
+    params
+  );
+
+  return res.data.access_token;
+}
+
+// =======================
+// 画像取得
+// =======================
+async function getImageUrl(fileId) {
+  const token = await getAccessToken();
+
+  const res = await axios.get(
+    `https://www.worksapis.com/v1.0/files/${fileId}`,
     {
       headers: {
-        "X-Cybozu-API-Token": process.env.KINTONE_API_TOKEN
-      }
+        Authorization: `Bearer ${token}`
+      },
+      responseType: 'arraybuffer'
     }
   );
 
-  console.log("✅ kintone登録完了");
+  return `data:image/jpeg;base64,${Buffer.from(res.data).toString('base64')}`;
 }
 
-// ===== ChatGPT OCR =====
+// =======================
+// ChatGPT OCR
+// =======================
 async function analyzeBusinessCard(imageUrl) {
   const response = await axios.post(
     "https://api.openai.com/v1/responses",
@@ -72,7 +99,41 @@ async function analyzeBusinessCard(imageUrl) {
   return JSON.parse(text);
 }
 
-// ===== Webhook受信 =====
+// =======================
+// kintone登録
+// =======================
+async function registerBusinessCard(data) {
+  const url = `https://${process.env.KINTONE_SUBDOMAIN}.cybozu.com/k/v1/record.json`;
+
+  await axios.post(
+    url,
+    {
+      app: process.env.KINTONE_APP_ID,
+      record: {
+        name: { value: data.name || "" },
+        company: { value: data.company || "" },
+        department: { value: data.department || "" },
+        position: { value: data.position || "" },
+        phone: { value: data.phone || "" },
+        mobile: { value: data.mobile || "" },
+        email: { value: data.email || "" },
+        address: { value: data.address || "" },
+        memo: { value: data.memo || "" }
+      }
+    },
+    {
+      headers: {
+        "X-Cybozu-API-Token": process.env.KINTONE_API_TOKEN
+      }
+    }
+  );
+
+  console.log("✅ kintone登録完了");
+}
+
+// =======================
+// Webhook受信
+// =======================
 app.post('/', async (req, res) => {
   res.sendStatus(200);
 
@@ -81,31 +142,30 @@ app.post('/', async (req, res) => {
 
     if (req.body.type !== "message") return;
 
-    // 画像チェック
     if (req.body.content?.type !== "image") {
-      console.log("⏭ 画像じゃないのでスキップ");
+      console.log("⏭ 画像以外スキップ");
       return;
     }
 
     const fileId = req.body.content.fileId;
 
-    // ===== 画像URL取得（簡易）=====
-    const imageUrl = `https://www.worksapis.com/v1.0/files/${fileId}`;
+    // 画像取得
+    const imageUrl = await getImageUrl(fileId);
 
-    // ===== OCR =====
+    // OCR解析
     const data = await analyzeBusinessCard(imageUrl);
 
     console.log("🧠 解析結果:", data);
 
-    // ===== kintone登録 =====
+    // kintone登録
     await registerBusinessCard(data);
 
   } catch (e) {
-    console.error("❌ エラー:", e.message);
+    console.error("❌ エラー:", e.response?.data || e.message);
   }
 });
 
-// ===== 起動 =====
+// =======================
 app.get('/', (req, res) => {
   res.send("名刺管理くん稼働中");
 });
