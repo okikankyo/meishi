@@ -1,61 +1,115 @@
+const express = require('express');
 const axios = require('axios');
 
-// ===== 名刺データ（テスト用）=====
-const businessCardData = {
-  name: "糸村 拓",
-  company: "リコージャパン株式会社",
-  department: "販売事業本部 沖縄支社 沖縄中北部営業所",
-  position: "",
-  phone: "098-934-5242",
-  mobile: "080-4096-1424",
-  email: "taku.itomura@jp.ricoh.com",
-  address: "〒904-2151 沖縄県沖縄市字松本855",
-  memo: "リコー沖縄支社の営業担当"
-};
+const app = express();
+app.use(express.json());
 
-// ===== kintone登録処理 =====
+// ===== kintone登録 =====
 async function registerBusinessCard(data) {
-  const subdomain = process.env.KINTONE_SUBDOMAIN;
-  const appId = process.env.KINTONE_APP_ID;
-  const apiToken = process.env.KINTONE_API_TOKEN;
+  const url = `https://${process.env.KINTONE_SUBDOMAIN}.cybozu.com/k/v1/record.json`;
 
-  if (!subdomain || !appId || !apiToken) {
-    throw new Error("❌ 環境変数が足りない（KINTONE設定）");
-  }
-
-  const url = `https://${subdomain}.cybozu.com/k/v1/record.json`;
-
-  try {
-    const response = await axios.post(
-      url,
-      {
-        app: appId,
-        record: {
-          name: { value: data.name || "" },
-          company: { value: data.company || "" },
-          department: { value: data.department || "" },
-          position: { value: data.position || "" },
-          phone: { value: data.phone || "" },
-          mobile: { value: data.mobile || "" },
-          email: { value: data.email || "" },
-          address: { value: data.address || "" },
-          memo: { value: data.memo || "" }
-        }
-      },
-      {
-        headers: {
-          "X-Cybozu-API-Token": apiToken,
-          "Content-Type": "application/json"
-        }
+  await axios.post(
+    url,
+    {
+      app: process.env.KINTONE_APP_ID,
+      record: {
+        name: { value: data.name || "" },
+        company: { value: data.company || "" },
+        department: { value: data.department || "" },
+        position: { value: data.position || "" },
+        phone: { value: data.phone || "" },
+        mobile: { value: data.mobile || "" },
+        email: { value: data.email || "" },
+        address: { value: data.address || "" },
+        memo: { value: data.memo || "" }
       }
-    );
+    },
+    {
+      headers: {
+        "X-Cybozu-API-Token": process.env.KINTONE_API_TOKEN
+      }
+    }
+  );
 
-    console.log("✅ 登録成功:", response.data);
-
-  } catch (error) {
-    console.error("❌ 登録失敗:", error.response?.data || error.message);
-  }
+  console.log("✅ kintone登録完了");
 }
 
-// ===== 実行 =====
-registerBusinessCard(businessCardData);
+// ===== ChatGPT OCR =====
+async function analyzeBusinessCard(imageUrl) {
+  const response = await axios.post(
+    "https://api.openai.com/v1/responses",
+    {
+      model: "gpt-4.1-mini",
+      input: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: `この画像は日本の名刺です。JSONで抽出してください：
+{
+"name":"","company":"","department":"","position":"",
+"phone":"","mobile":"","email":"","address":"","memo":""
+}`
+            },
+            {
+              type: "input_image",
+              image_url: imageUrl
+            }
+          ]
+        }
+      ]
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      }
+    }
+  );
+
+  const text = response.data.output[0].content[0].text;
+  return JSON.parse(text);
+}
+
+// ===== Webhook受信 =====
+app.post('/', async (req, res) => {
+  res.sendStatus(200);
+
+  try {
+    console.log("📩 受信:", JSON.stringify(req.body));
+
+    if (req.body.type !== "message") return;
+
+    // 画像チェック
+    if (req.body.content?.type !== "image") {
+      console.log("⏭ 画像じゃないのでスキップ");
+      return;
+    }
+
+    const fileId = req.body.content.fileId;
+
+    // ===== 画像URL取得（簡易）=====
+    const imageUrl = `https://www.worksapis.com/v1.0/files/${fileId}`;
+
+    // ===== OCR =====
+    const data = await analyzeBusinessCard(imageUrl);
+
+    console.log("🧠 解析結果:", data);
+
+    // ===== kintone登録 =====
+    await registerBusinessCard(data);
+
+  } catch (e) {
+    console.error("❌ エラー:", e.message);
+  }
+});
+
+// ===== 起動 =====
+app.get('/', (req, res) => {
+  res.send("名刺管理くん稼働中");
+});
+
+app.listen(process.env.PORT || 10000, () => {
+  console.log("🚀 Server started");
+});
