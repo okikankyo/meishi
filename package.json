@@ -1,12 +1,9 @@
 {
   "name": "meisi",
   "version": "1.0.0",
-  "description": "名刺管理くん",
   "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
   "dependencies": {
+    "express": "^4.18.2",
     "axios": "^1.6.0"
   }
 }
