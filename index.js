@@ -74,7 +74,7 @@ async function getAccessToken() {
   form.append("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer");
   form.append("client_id", LW_CLIENT_ID);
   form.append("client_secret", LW_CLIENT_SECRET);
-  form.append("scope", "bot");
+  form.append("scope", "bot bot.message");
 
   const response = await axios.post(tokenUrl, form.toString(), {
     headers: {
@@ -111,31 +111,6 @@ async function sendTextMessage(token, channelId, text) {
 }
 
 // =========================
-// 添付取得（公式API）
-// =========================
-async function getAttachmentInfoOfficial(token, fileId) {
-  const url = `https://www.worksapis.com/v1.0/bots/${LW_BOT_ID}/attachments/${fileId}`;
-
-  const response = await axios.get(url, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-    timeout: 30000,
-    validateStatus: () => true,
-  });
-
-  if (response.status >= 200 && response.status < 300) {
-    return response.data;
-  }
-
-  const error = new Error(
-    `公式添付API失敗 status=${response.status} body=${JSON.stringify(response.data)}`
-  );
-  error.response = response;
-  throw error;
-}
-
-// =========================
 // fileIdからstorage URLを作る
 // =========================
 function buildStorageDownloadUrl(fileId) {
@@ -153,54 +128,57 @@ function buildStorageDownloadUrl(fileId) {
 // 画像取得
 // =========================
 async function downloadAttachmentBuffer(token, fileId) {
-  try {
-    const attachmentInfo = await getAttachmentInfoOfficial(token, fileId);
+  const officialUrl = `https://www.worksapis.com/v1.0/bots/${LW_BOT_ID}/attachments/${fileId}`;
 
-    const candidateUrl =
-      attachmentInfo.downloadUrl ||
-      attachmentInfo.url ||
-      attachmentInfo.resourceUrl ||
-      attachmentInfo.href;
+  // まず公式APIを試す
+  const officialResponse = await axios.get(officialUrl, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+    responseType: "arraybuffer",
+    timeout: 30000,
+    validateStatus: () => true,
+    maxRedirects: 0,
+  });
 
-    if (!candidateUrl) {
-      throw new Error(
-        `公式API成功だがダウンロードURLなし: ${JSON.stringify(attachmentInfo)}`
-      );
-    }
-
-    const fileResponse = await axios.get(candidateUrl, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-      responseType: "arraybuffer",
-      timeout: 30000,
-    });
-
-    return Buffer.from(fileResponse.data);
-  } catch (officialError) {
-    console.log("⚠️ 公式API失敗、storage URLで再試行");
-    console.log(officialError.message);
-
-    const fallbackUrl = buildStorageDownloadUrl(fileId);
-
-    const fileResponse = await axios.get(fallbackUrl, {
-      responseType: "arraybuffer",
-      timeout: 30000,
-      validateStatus: () => true,
-    });
-
-    if (fileResponse.status < 200 || fileResponse.status >= 300) {
-      const bodyText = Buffer.isBuffer(fileResponse.data)
-        ? fileResponse.data.toString("utf8")
-        : JSON.stringify(fileResponse.data);
-
-      throw new Error(
-        `storage URL取得失敗 status=${fileResponse.status} body=${bodyText}`
-      );
-    }
-
-    return Buffer.from(fileResponse.data);
+  if (officialResponse.status >= 200 && officialResponse.status < 300) {
+    console.log("✅ 公式APIで画像取得成功");
+    return Buffer.from(officialResponse.data);
   }
+
+  const officialBodyText = Buffer.isBuffer(officialResponse.data)
+    ? officialResponse.data.toString("utf8")
+    : JSON.stringify(officialResponse.data);
+
+  console.log("⚠️ 公式API失敗、storage URLで再試行");
+  console.log("公式API status:", officialResponse.status);
+  console.log("公式API headers:", officialResponse.headers);
+  console.log("公式API body:", officialBodyText);
+
+  // 次に storage URL を試す
+  const fallbackUrl = buildStorageDownloadUrl(fileId);
+
+  const storageResponse = await axios.get(fallbackUrl, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+    responseType: "arraybuffer",
+    timeout: 30000,
+    validateStatus: () => true,
+  });
+
+  if (storageResponse.status >= 200 && storageResponse.status < 300) {
+    console.log("✅ storage URLで画像取得成功");
+    return Buffer.from(storageResponse.data);
+  }
+
+  const storageBodyText = Buffer.isBuffer(storageResponse.data)
+    ? storageResponse.data.toString("utf8")
+    : JSON.stringify(storageResponse.data);
+
+  throw new Error(
+    `storage URL取得失敗 status=${storageResponse.status} body=${storageBodyText}`
+  );
 }
 
 // =========================
