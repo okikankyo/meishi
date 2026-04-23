@@ -31,7 +31,10 @@ async function getAccessToken() {
 
   const res = await axios.post(
     'https://auth.worksmobile.com/oauth2/v2.0/token',
-    params
+    params,
+    {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+    }
   );
 
   return res.data.access_token;
@@ -49,21 +52,26 @@ async function sendMessage(text) {
       content: { type: "text", text }
     },
     {
-      headers: { Authorization: `Bearer ${token}` }
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      }
     }
   );
 }
 
 // =======================
-// 画像取得
+// 画像取得（修正版）
 // =======================
 async function getImageUrl(fileId) {
   const token = await getAccessToken();
 
   const res = await axios.get(
-    `https://www.worksapis.com/v1.0/files/${fileId}`,
+    `https://www.worksapis.com/v1.0/bots/${process.env.LW_BOT_ID}/files/${fileId}`,
     {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: {
+        Authorization: `Bearer ${token}`
+      },
       responseType: 'arraybuffer'
     }
   );
@@ -101,7 +109,8 @@ async function analyzeBusinessCard(imageUrl) {
     },
     {
       headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
       }
     }
   );
@@ -172,7 +181,7 @@ app.post('/', async (req, res) => {
 });
 
 // =======================
-// サーバー起動（1つだけ！）
+// 起動（1つだけ！）
 // =======================
 app.get('/', (req, res) => {
   res.send("名刺管理くん稼働中");
