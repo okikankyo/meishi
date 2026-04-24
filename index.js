@@ -7,17 +7,33 @@ app.use(express.json({ limit: '20mb' }));
 
 const pendingData = {};
 const pendingMemo = {};
-const userModes = {};
-
-function escapeKintoneQueryValue(value) {
-  return String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-}
+const userModes = {}; // manual / auto
 
 function decodeErrorBody(data) {
   if (!data) return '';
   if (Buffer.isBuffer(data)) return data.toString('utf8');
   if (typeof data === 'string') return data;
   return JSON.stringify(data);
+}
+
+function escapeKintoneQueryValue(value) {
+  return String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function cleanKey(value) {
+  return String(value || '')
+    .replace(/\s+/g, '')
+    .replace(/株式会社/g, '株式会社')
+    .trim();
+}
+
+function buildDuplicateKey(data) {
+  const company = cleanKey(data.company);
+  const name = cleanKey(data.name);
+
+  if (!company && !name) return '';
+
+  return `${company}_${name}`;
 }
 
 async function getAccessToken() {
@@ -260,7 +276,8 @@ async function searchBusinessCards(keyword) {
     department like "${safe}" or
     email like "${safe}" or
     phone like "${safe}" or
-    mobile like "${safe}"
+    mobile like "${safe}" or
+    address like "${safe}"
     order by $id desc
     limit 5
   `;
@@ -351,6 +368,15 @@ async function register(data, userId) {
     };
   }
 
+  const duplicateKeyCode = process.env.KINTONE_DUPLICATE_KEY_CODE || 'duplicate_key';
+  const duplicateKey = buildDuplicateKey(data);
+
+  if (duplicateKeyCode) {
+    record[duplicateKeyCode] = {
+      value: duplicateKey
+    };
+  }
+
   await axios.post(
     `https://${process.env.KINTONE_SUBDOMAIN}.cybozu.com/k/v1/record.json`,
     {
@@ -367,7 +393,8 @@ async function register(data, userId) {
 
   return {
     duplicated: duplicate.duplicated,
-    note: duplicate.note
+    note: duplicate.note,
+    duplicateKey
   };
 }
 
