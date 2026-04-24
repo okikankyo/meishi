@@ -6,6 +6,7 @@ const app = express();
 app.use(express.json({ limit: '20mb' }));
 
 const pendingData = {};
+const userModes = {}; // userIdごとに auto / manual を保持
 
 function decodeErrorBody(data) {
   if (!data) return '';
@@ -253,11 +254,11 @@ function buildSearchResultMessage(records, keyword) {
     return `🔍「${keyword}」は見つかりませんでした`;
   }
 
+  const faxCode = process.env.KINTONE_FAX_FIELD_CODE || 'fax';
+
   let msg = `🔍 名刺検索結果：「${keyword}」\n\n`;
 
   records.forEach((r, index) => {
-    const faxCode = process.env.KINTONE_FAX_FIELD_CODE || 'fax';
-
     msg += `【${index + 1}】\n`;
     msg += `名前：${r.name?.value || ''}\n`;
     msg += `会社：${r.company?.value || ''}\n`;
@@ -327,6 +328,56 @@ async function register(data, userId) {
   return { duplicated: false };
 }
 
+async function handleImage(body, userId) {
+  const fileInfo = await fetchImageBuffer(body.content.fileId);
+
+  console.log(`✅ 画像取得成功: ${fileInfo.buffer.length} bytes`);
+
+  const imageDataUrl =
+    `data:${fileInfo.contentType};base64,${fileInfo.buffer.toString('base64')}`;
+
+  const data = await analyzeBusinessCard(imageDataUrl);
+
+  data._buffer = fileInfo.buffer;
+  data._contentType = fileInfo.contentType;
+
+  const mode = userModes[userId] || 'manual';
+
+  if (mode === 'auto') {
+    const result = await register(data, userId);
+
+    await sendMessage(
+      result.duplicated
+        ? `⚠️ 既に登録済み：${data.name || '名前不明'}`
+        : `✅ 自動登録しました：${data.name || '名前不明'}`
+    );
+
+    return;
+  }
+
+  pendingData[userId] = data;
+
+  await sendMessage(
+`📋 確認
+
+名前：${data.name || ''}
+会社：${data.company || ''}
+部署：${data.department || ''}
+役職：${data.position || ''}
+電話：${data.phone || ''}
+携帯：${data.mobile || ''}
+FAX：${data.fax || ''}
+メール：${data.email || ''}
+住所：${data.address || ''}
+メモ：${data.memo || ''}
+
+👉 OK / NG
+
+※自動登録にする場合は「auto」
+※確認モードに戻す場合は「manual」`
+  );
+}
+
 app.post('/', async (req, res) => {
   res.sendStatus(200);
 
@@ -339,6 +390,18 @@ app.post('/', async (req, res) => {
     if (body.type === 'message' && body.content?.type === 'text') {
       const originalText = body.content.text.trim();
       const text = originalText.toUpperCase();
+
+      if (text === 'AUTO') {
+        userModes[userId] = 'auto';
+        await sendMessage('✅ 自動登録モードにしました。名刺画像を送ると確認なしで登録します。');
+        return;
+      }
+
+      if (text === 'MANUAL') {
+        userModes[userId] = 'manual';
+        await sendMessage('✅ 確認モードにしました。名刺画像を送るとOK/NG確認します。');
+        return;
+      }
 
       if (text === 'OK' && pendingData[userId]) {
         const data = pendingData[userId];
@@ -368,36 +431,7 @@ app.post('/', async (req, res) => {
     if (body.type !== 'message') return;
     if (body.content?.type !== 'image') return;
 
-    const fileInfo = await fetchImageBuffer(body.content.fileId);
-
-    console.log(`✅ 画像取得成功: ${fileInfo.buffer.length} bytes`);
-
-    const imageDataUrl =
-      `data:${fileInfo.contentType};base64,${fileInfo.buffer.toString('base64')}`;
-
-    const data = await analyzeBusinessCard(imageDataUrl);
-
-    data._buffer = fileInfo.buffer;
-    data._contentType = fileInfo.contentType;
-
-    pendingData[userId] = data;
-
-    await sendMessage(
-`📋 確認
-
-名前：${data.name || ''}
-会社：${data.company || ''}
-部署：${data.department || ''}
-役職：${data.position || ''}
-電話：${data.phone || ''}
-携帯：${data.mobile || ''}
-FAX：${data.fax || ''}
-メール：${data.email || ''}
-住所：${data.address || ''}
-メモ：${data.memo || ''}
-
-👉 OK / NG`
-    );
+    await handleImage(body, userId);
 
   } catch (e) {
     console.error('❌ エラー:', e.response?.data || e.message);
