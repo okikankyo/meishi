@@ -14,22 +14,16 @@ function decodeErrorBody(data) {
   return JSON.stringify(data);
 }
 
-// =======================
-// LINE WORKS TOKEN
-// =======================
+function escapeKintoneQueryValue(value) {
+  return String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
 async function getAccessToken() {
   const now = Math.floor(Date.now() / 1000);
   const privateKey = (process.env.LW_PRIVATE_KEY || '')
     .replace(/^"(.*)"$/s, '$1')
     .replace(/\\n/g, '\n')
     .trim();
-
-  console.log('LW_CLIENT_ID exists:', !!process.env.LW_CLIENT_ID);
-  console.log('LW_CLIENT_SECRET exists:', !!process.env.LW_CLIENT_SECRET);
-  console.log('LW_SERVICE_ACCOUNT exists:', !!process.env.LW_SERVICE_ACCOUNT);
-  console.log('LW_BOT_ID exists:', !!process.env.LW_BOT_ID);
-  console.log('PRIVATE_KEY header ok:', privateKey.includes('BEGIN PRIVATE KEY'));
-  console.log('PRIVATE_KEY footer ok:', privateKey.includes('END PRIVATE KEY'));
 
   const payload = {
     iss: process.env.LW_CLIENT_ID,
@@ -45,28 +39,18 @@ async function getAccessToken() {
   params.append('client_id', process.env.LW_CLIENT_ID);
   params.append('client_secret', process.env.LW_CLIENT_SECRET);
   params.append('assertion', assertion);
-
-  // user.read は入れない。まず安定優先。
   params.append('scope', 'bot bot.message');
 
-  try {
-    const res = await axios.post(
-      'https://auth.worksmobile.com/oauth2/v2.0/token',
-      params,
-      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
-    );
+  const res = await axios.post(
+    'https://auth.worksmobile.com/oauth2/v2.0/token',
+    params,
+    { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+  );
 
-    console.log('✅ token取得成功');
-    return res.data.access_token;
-  } catch (e) {
-    console.error('❌ token取得失敗:', e.response?.data || e.message);
-    throw e;
-  }
+  console.log('✅ token取得成功');
+  return res.data.access_token;
 }
 
-// =======================
-// LINE WORKS SEND
-// =======================
 async function sendMessage(text) {
   const token = await getAccessToken();
 
@@ -89,9 +73,6 @@ async function sendMessage(text) {
   console.log('✅ グループ返信成功');
 }
 
-// =======================
-// IMAGE FETCH
-// =======================
 async function fetchImageBuffer(fileId) {
   const token = await getAccessToken();
 
@@ -131,9 +112,6 @@ async function fetchImageBuffer(fileId) {
   throw new Error(`画像取得失敗: status=${first.status} body=${decodeErrorBody(first.data)}`);
 }
 
-// =======================
-// OCR
-// =======================
 async function analyzeBusinessCard(imageDataUrl) {
   const res = await axios.post(
     'https://api.openai.com/v1/responses',
@@ -194,9 +172,6 @@ async function analyzeBusinessCard(imageDataUrl) {
   return JSON.parse(cleaned);
 }
 
-// =======================
-// KINTONE FILE UPLOAD
-// =======================
 async function uploadFile(buffer, contentType) {
   const form = new FormData();
   const blob = new Blob([buffer], { type: contentType || 'image/jpeg' });
@@ -224,15 +199,12 @@ async function uploadFile(buffer, contentType) {
   return json.fileKey;
 }
 
-// =======================
-// DUPLICATE CHECK
-// =======================
 async function checkDuplicate(data) {
   if (!data.email && !data.phone) return false;
 
   const query = data.email
-    ? `email = "${data.email}"`
-    : `phone = "${data.phone}"`;
+    ? `email = "${escapeKintoneQueryValue(data.email)}"`
+    : `phone = "${escapeKintoneQueryValue(data.phone)}"`;
 
   const res = await axios.get(
     `https://${process.env.KINTONE_SUBDOMAIN}.cybozu.com/k/v1/records.json`,
@@ -248,9 +220,59 @@ async function checkDuplicate(data) {
   return res.data.records.length > 0;
 }
 
-// =======================
-// REGISTER
-// =======================
+async function searchBusinessCards(keyword) {
+  const safe = escapeKintoneQueryValue(keyword);
+
+  const query = `
+    name like "${safe}" or
+    company like "${safe}" or
+    department like "${safe}" or
+    email like "${safe}" or
+    phone like "${safe}" or
+    mobile like "${safe}"
+    order by $id desc
+    limit 5
+  `;
+
+  const res = await axios.get(
+    `https://${process.env.KINTONE_SUBDOMAIN}.cybozu.com/k/v1/records.json`,
+    {
+      headers: { 'X-Cybozu-API-Token': process.env.KINTONE_API_TOKEN },
+      params: {
+        app: Number(process.env.KINTONE_APP_ID),
+        query
+      }
+    }
+  );
+
+  return res.data.records;
+}
+
+function buildSearchResultMessage(records, keyword) {
+  if (!records.length) {
+    return `🔍「${keyword}」は見つかりませんでした`;
+  }
+
+  let msg = `🔍 名刺検索結果：「${keyword}」\n\n`;
+
+  records.forEach((r, index) => {
+    const faxCode = process.env.KINTONE_FAX_FIELD_CODE || 'fax';
+
+    msg += `【${index + 1}】\n`;
+    msg += `名前：${r.name?.value || ''}\n`;
+    msg += `会社：${r.company?.value || ''}\n`;
+    msg += `部署：${r.department?.value || ''}\n`;
+    msg += `役職：${r.position?.value || ''}\n`;
+    msg += `電話：${r.phone?.value || ''}\n`;
+    msg += `携帯：${r.mobile?.value || ''}\n`;
+    msg += `FAX：${r[faxCode]?.value || ''}\n`;
+    msg += `メール：${r.email?.value || ''}\n`;
+    msg += `住所：${r.address?.value || ''}\n\n`;
+  });
+
+  return msg.trim();
+}
+
 async function register(data, userId) {
   const duplicated = await checkDuplicate(data);
   if (duplicated) return { duplicated: true };
@@ -267,22 +289,18 @@ async function register(data, userId) {
     memo: { value: data.memo || '' }
   };
 
-  // FAXフィールド
   if (process.env.KINTONE_FAX_FIELD_CODE) {
     record[process.env.KINTONE_FAX_FIELD_CODE] = {
       value: data.fax || ''
     };
   }
 
-  // ownerフィールド
-  // LINE WORKSの名前取得は一旦せず、ENV指定があればそれを入れる。なければuserId。
   if (process.env.KINTONE_OWNER_FIELD_CODE) {
     record[process.env.KINTONE_OWNER_FIELD_CODE] = {
       value: process.env.KINTONE_OWNER_VALUE || userId || ''
     };
   }
 
-  // 名刺画像フィールド
   if (process.env.KINTONE_FILE_FIELD_CODE && data._buffer) {
     const fileKey = await uploadFile(data._buffer, data._contentType);
 
@@ -309,9 +327,6 @@ async function register(data, userId) {
   return { duplicated: false };
 }
 
-// =======================
-// WEBHOOK
-// =======================
 app.post('/', async (req, res) => {
   res.sendStatus(200);
 
@@ -321,9 +336,9 @@ app.post('/', async (req, res) => {
 
     console.log('📩 受信:', JSON.stringify(body));
 
-    // OK / NG
     if (body.type === 'message' && body.content?.type === 'text') {
-      const text = body.content.text.trim().toUpperCase();
+      const originalText = body.content.text.trim();
+      const text = originalText.toUpperCase();
 
       if (text === 'OK' && pendingData[userId]) {
         const data = pendingData[userId];
@@ -345,10 +360,11 @@ app.post('/', async (req, res) => {
         return;
       }
 
+      const records = await searchBusinessCards(originalText);
+      await sendMessage(buildSearchResultMessage(records, originalText));
       return;
     }
 
-    // 画像
     if (body.type !== 'message') return;
     if (body.content?.type !== 'image') return;
 
@@ -394,9 +410,6 @@ FAX：${data.fax || ''}
   }
 });
 
-// =======================
-// HEALTH CHECK
-// =======================
 app.get('/', (req, res) => {
   res.send('名刺管理くん稼働中');
 });
