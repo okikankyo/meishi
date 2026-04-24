@@ -7,6 +7,9 @@ app.use(express.json({ limit: '20mb' }));
 
 const pendingData = {};
 
+// =======================
+// 共通
+// =======================
 function decodeErrorBody(data) {
   if (!data) return '';
   if (Buffer.isBuffer(data)) return data.toString('utf8');
@@ -35,7 +38,7 @@ async function getAccessToken() {
   params.append('client_id', process.env.LW_CLIENT_ID);
   params.append('client_secret', process.env.LW_CLIENT_SECRET);
   params.append('assertion', assertion);
-  params.append('scope', 'bot bot.message');
+  params.append('scope', 'bot bot.message user.read');
 
   const res = await axios.post(
     'https://auth.worksmobile.com/oauth2/v2.0/token',
@@ -48,7 +51,23 @@ async function getAccessToken() {
 }
 
 // =======================
-// SEND MESSAGE
+// LINE WORKSユーザー名取得
+// =======================
+async function getLineUserName(userId) {
+  try {
+    const token = await getAccessToken();
+    const res = await axios.get(
+      `https://www.worksapis.com/v1.0/users/${userId}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    return res.data.userName || res.data.displayName || userId;
+  } catch {
+    return userId;
+  }
+}
+
+// =======================
+// メッセージ送信
 // =======================
 async function sendMessage(text) {
   const token = await getAccessToken();
@@ -56,19 +75,12 @@ async function sendMessage(text) {
   await axios.post(
     `https://www.worksapis.com/v1.0/bots/${process.env.LW_BOT_ID}/channels/${process.env.LW_TARGET_CHANNEL_ID}/messages`,
     { content: { type: 'text', text } },
-    {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      }
-    }
+    { headers: { Authorization: `Bearer ${token}` } }
   );
-
-  console.log('✅ グループ返信成功');
 }
 
 // =======================
-// IMAGE FETCH
+// 画像取得
 // =======================
 async function fetchImageBuffer(fileId) {
   const token = await getAccessToken();
@@ -85,13 +97,11 @@ async function fetchImageBuffer(fileId) {
   if (first.status === 200) {
     return {
       buffer: Buffer.from(first.data),
-      contentType: first.headers['content-type'] || 'image/jpeg'
+      contentType: first.headers['content-type']
     };
   }
 
-  if (first.status === 302 && first.headers.location) {
-    console.log('⚠️ 公式APIは302、storage URLで再取得');
-
+  if (first.status === 302) {
     const second = await axios.get(first.headers.location, {
       headers: { Authorization: `Bearer ${token}` },
       responseType: 'arraybuffer'
@@ -99,7 +109,7 @@ async function fetchImageBuffer(fileId) {
 
     return {
       buffer: Buffer.from(second.data),
-      contentType: second.headers['content-type'] || 'image/jpeg'
+      contentType: second.headers['content-type']
     };
   }
 
@@ -110,7 +120,7 @@ async function fetchImageBuffer(fileId) {
 // OCR
 // =======================
 async function analyzeBusinessCard(imageDataUrl) {
-  const response = await axios.post(
+  const res = await axios.post(
     'https://api.openai.com/v1/responses',
     {
       model: 'gpt-4.1-mini',
@@ -120,7 +130,7 @@ async function analyzeBusinessCard(imageDataUrl) {
           content: [
             {
               type: 'input_text',
-              text: `名刺をJSONで抽出
+              text: `名刺情報をJSONで抽出
 
 {
 "name":"",
@@ -129,10 +139,16 @@ async function analyzeBusinessCard(imageDataUrl) {
 "position":"",
 "phone":"",
 "mobile":"",
+"fax":"",
 "email":"",
 "address":"",
 "memo":""
-}`
+}
+
+・住所はaddress
+・FAXはfax
+・FAXやURLはmemoに入れない
+・JSONのみ返す`
             },
             {
               type: 'input_image',
@@ -143,13 +159,11 @@ async function analyzeBusinessCard(imageDataUrl) {
       ]
     },
     {
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
-      }
+      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` }
     }
   );
 
-  const raw = response.data.output?.[0]?.content?.[0]?.text;
+  const raw = res.data.output[0].content[0].text;
 
   const cleaned = raw
     .replace(/```json/g, '')
@@ -160,122 +174,136 @@ async function analyzeBusinessCard(imageDataUrl) {
 }
 
 // =======================
-// DUPLICATE
+// kintone ファイルアップロード
 // =======================
-async function checkDuplicate(data) {
-  if (!data.email && !data.phone) return false;
+async function uploadFile(buffer) {
+  const form = new FormData();
+  const blob = new Blob([buffer]);
 
-  const query = data.email
-    ? `email = "${data.email}"`
-    : `phone = "${data.phone}"`;
+  form.append('file', blob, 'meishi.jpg');
 
-  const res = await axios.get(
-    `https://${process.env.KINTONE_SUBDOMAIN}.cybozu.com/k/v1/records.json`,
+  const res = await fetch(
+    `https://${process.env.KINTONE_SUBDOMAIN}.cybozu.com/k/v1/file.json`,
     {
-      headers: { 'X-Cybozu-API-Token': process.env.KINTONE_API_TOKEN },
-      params: {
-        app: Number(process.env.KINTONE_APP_ID),
-        query
-      }
+      method: 'POST',
+      headers: {
+        'X-Cybozu-API-Token': process.env.KINTONE_API_TOKEN
+      },
+      body: form
     }
   );
 
-  return res.data.records.length > 0;
+  const json = await res.json();
+  return json.fileKey;
 }
 
 // =======================
-// REGISTER
+// 登録
 // =======================
-async function registerBusinessCard(data) {
-  const duplicated = await checkDuplicate(data);
-  if (duplicated) return { duplicated: true };
+async function register(data, userId) {
+  const ownerName = await getLineUserName(userId);
+
+  const record = {
+    name: { value: data.name },
+    company: { value: data.company },
+    department: { value: data.department },
+    position: { value: data.position },
+    phone: { value: data.phone },
+    mobile: { value: data.mobile },
+    email: { value: data.email },
+    address: { value: data.address },
+    memo: { value: data.memo }
+  };
+
+  // FAX
+  if (process.env.KINTONE_FAX_FIELD_CODE) {
+    record[process.env.KINTONE_FAX_FIELD_CODE] = {
+      value: data.fax || ''
+    };
+  }
+
+  // 担当者
+  if (process.env.KINTONE_OWNER_FIELD_CODE) {
+    record[process.env.KINTONE_OWNER_FIELD_CODE] = {
+      value: ownerName
+    };
+  }
+
+  // 画像
+  if (process.env.KINTONE_FILE_FIELD_CODE && data._buffer) {
+    const fileKey = await uploadFile(data._buffer);
+
+    record[process.env.KINTONE_FILE_FIELD_CODE] = {
+      value: [{ fileKey }]
+    };
+  }
 
   await axios.post(
     `https://${process.env.KINTONE_SUBDOMAIN}.cybozu.com/k/v1/record.json`,
     {
       app: Number(process.env.KINTONE_APP_ID),
-      record: {
-        name: { value: data.name || '' },
-        company: { value: data.company || '' },
-        department: { value: data.department || '' },
-        position: { value: data.position || '' },
-        phone: { value: data.phone || '' },
-        mobile: { value: data.mobile || '' },
-        email: { value: data.email || '' },
-        address: { value: data.address || '' },
-        memo: { value: data.memo || '' }
-      }
+      record
     },
     {
-      headers: { 'X-Cybozu-API-Token': process.env.KINTONE_API_TOKEN }
+      headers: {
+        'X-Cybozu-API-Token': process.env.KINTONE_API_TOKEN
+      }
     }
   );
 
-  console.log('✅ kintone登録完了');
-  return { duplicated: false };
+  console.log('✅ 登録完了');
 }
 
 // =======================
-// WEBHOOK
+// Webhook
 // =======================
 app.post('/', async (req, res) => {
   res.sendStatus(200);
 
-  try {
-    const body = req.body;
-    const userId = body.source?.userId;
+  const body = req.body;
+  const userId = body.source?.userId;
 
-    console.log('📩 受信:', JSON.stringify(body));
+  console.log('📩 受信:', JSON.stringify(body));
 
-    // TEXT
-    if (body.type === 'message' && body.content?.type === 'text') {
-      const text = body.content.text.trim().toUpperCase();
+  // OK処理
+  if (body.content?.type === 'text') {
+    const text = body.content.text.trim().toUpperCase();
 
-      if (text === 'OK' && pendingData[userId]) {
-        const data = pendingData[userId];
-        const result = await registerBusinessCard(data);
-
-        await sendMessage(
-          result.duplicated
-            ? `⚠️ 既に登録済み：${data.name}`
-            : `✅ 登録しました：${data.name}`
-        );
-
-        delete pendingData[userId];
-        return;
-      }
-
-      if (text === 'NG' && pendingData[userId]) {
-        delete pendingData[userId];
-        await sendMessage('❌ キャンセルしました');
-        return;
-      }
+    if (text === 'OK' && pendingData[userId]) {
+      await register(pendingData[userId], userId);
+      await sendMessage('✅ 登録しました');
+      delete pendingData[userId];
+      return;
     }
 
-    // IMAGE
-    if (body.content?.type !== 'image') return;
+    if (text === 'NG') {
+      delete pendingData[userId];
+      await sendMessage('❌ キャンセルしました');
+      return;
+    }
+  }
 
-    const fileInfo = await fetchImageBuffer(body.content.fileId);
+  // 画像処理
+  if (body.content?.type === 'image') {
+    const file = await fetchImageBuffer(body.content.fileId);
 
     const imageDataUrl =
-      `data:${fileInfo.contentType};base64,${fileInfo.buffer.toString('base64')}`;
+      `data:${file.contentType};base64,${file.buffer.toString('base64')}`;
 
     const data = await analyzeBusinessCard(imageDataUrl);
 
+    data._buffer = file.buffer;
     pendingData[userId] = data;
 
     await sendMessage(
 `📋 確認
-
 名前：${data.name}
 会社：${data.company}
+FAX：${data.fax}
+住所：${data.address}
 
 👉 OK / NG`
     );
-
-  } catch (e) {
-    console.error('❌ エラー:', decodeErrorBody(e.response?.data) || e.message);
-    await sendMessage('❌ エラー発生');
   }
 });
 
