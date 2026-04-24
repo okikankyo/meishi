@@ -7,9 +7,6 @@ app.use(express.json({ limit: '20mb' }));
 
 const pendingData = {};
 
-// =======================
-// 共通
-// =======================
 function decodeErrorBody(data) {
   if (!data) return '';
   if (Buffer.isBuffer(data)) return data.toString('utf8');
@@ -17,9 +14,6 @@ function decodeErrorBody(data) {
   return JSON.stringify(data);
 }
 
-// =======================
-// LINE WORKS トークン
-// =======================
 async function getAccessToken() {
   const now = Math.floor(Date.now() / 1000);
   const privateKey = (process.env.LW_PRIVATE_KEY || '').replace(/\\n/g, '\n');
@@ -50,9 +44,6 @@ async function getAccessToken() {
   return res.data.access_token;
 }
 
-// =======================
-// メッセージ送信
-// =======================
 async function sendMessage(text) {
   const token = await getAccessToken();
 
@@ -70,9 +61,6 @@ async function sendMessage(text) {
   console.log('✅ グループ返信成功');
 }
 
-// =======================
-// 画像取得（完全版）
-// =======================
 async function fetchImageBuffer(fileId) {
   const token = await getAccessToken();
 
@@ -86,7 +74,6 @@ async function fetchImageBuffer(fileId) {
     validateStatus: () => true
   });
 
-  // 成功パターン
   if (first.status === 200) {
     console.log('✅ 公式APIで画像取得成功');
     return {
@@ -95,19 +82,17 @@ async function fetchImageBuffer(fileId) {
     };
   }
 
-  // 302 → storage再取得
   if (first.status === 302 && first.headers.location) {
     console.log('⚠️ 公式APIは302、storage URLで再取得');
 
     const second = await axios.get(first.headers.location, {
       headers: {
-        Authorization: `Bearer ${token}` // ←ここが今回の修正🔥
+        Authorization: `Bearer ${token}`
       },
       responseType: 'arraybuffer'
     });
 
     console.log('✅ storage URLで画像取得成功');
-
     return {
       buffer: Buffer.from(second.data),
       contentType: second.headers['content-type'] || 'image/jpeg'
@@ -119,9 +104,6 @@ async function fetchImageBuffer(fileId) {
   );
 }
 
-// =======================
-// ChatGPT OCR
-// =======================
 async function analyzeBusinessCard(imageDataUrl) {
   const response = await axios.post(
     'https://api.openai.com/v1/responses',
@@ -133,19 +115,27 @@ async function analyzeBusinessCard(imageDataUrl) {
           content: [
             {
               type: 'input_text',
-              text: `名刺をJSONで抽出してください
+              text: `この画像は日本の名刺です。JSON形式で抽出してください。
 
 {
-"name": "",
-"company": "",
-"department": "",
-"position": "",
-"phone": "",
-"mobile": "",
-"email": "",
-"address": "",
-"memo": ""
-}`
+  "name": "",
+  "company": "",
+  "department": "",
+  "position": "",
+  "phone": "",
+  "mobile": "",
+  "email": "",
+  "address": "",
+  "memo": ""
+}
+
+ルール:
+・存在しない項目は空文字
+・会社名は正式名称
+・電話と携帯は分ける
+・memo は1行で簡単な人物説明
+・余計な説明は不要
+・JSONのみ返す`
             },
             {
               type: 'input_image',
@@ -157,27 +147,25 @@ async function analyzeBusinessCard(imageDataUrl) {
     },
     {
       headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
       }
     }
   );
 
-  return JSON.parse(response.data.output[0].content[0].text);
+  const text = response.data.output?.[0]?.content?.[0]?.text;
+  if (!text) throw new Error('OpenAIの応答からJSONを取得できませんでした');
+
+  return JSON.parse(text);
 }
 
-// =======================
-// 重複チェック
-// =======================
 async function checkDuplicate(data) {
   const url = `https://${process.env.KINTONE_SUBDOMAIN}.cybozu.com/k/v1/records.json`;
 
-  let query = data.email
-    ? `email = "${data.email}"`
-    : data.phone
-    ? `phone = "${data.phone}"`
-    : '';
-
-  if (!query) return false;
+  let query = '';
+  if (data.email) query = `email = "${data.email}"`;
+  else if (data.phone) query = `phone = "${data.phone}"`;
+  else return false;
 
   const res = await axios.get(url, {
     headers: { 'X-Cybozu-API-Token': process.env.KINTONE_API_TOKEN },
@@ -190,9 +178,6 @@ async function checkDuplicate(data) {
   return res.data.records.length > 0;
 }
 
-// =======================
-// kintone登録
-// =======================
 async function registerBusinessCard(data) {
   const duplicated = await checkDuplicate(data);
   if (duplicated) return { duplicated: true };
@@ -217,7 +202,8 @@ async function registerBusinessCard(data) {
     },
     {
       headers: {
-        'X-Cybozu-API-Token': process.env.KINTONE_API_TOKEN
+        'X-Cybozu-API-Token': process.env.KINTONE_API_TOKEN,
+        'Content-Type': 'application/json'
       }
     }
   );
@@ -226,9 +212,6 @@ async function registerBusinessCard(data) {
   return { duplicated: false };
 }
 
-// =======================
-// Webhook（OKフロー）
-// =======================
 app.post('/', async (req, res) => {
   res.sendStatus(200);
 
@@ -238,18 +221,17 @@ app.post('/', async (req, res) => {
 
     console.log('📩 受信:', JSON.stringify(body));
 
-    // テキスト
     if (body.type === 'message' && body.content?.type === 'text') {
-      const text = body.content.text;
+      const text = body.content.text.trim().toUpperCase();
 
       if (text === 'OK' && pendingData[userId]) {
         const data = pendingData[userId];
         const result = await registerBusinessCard(data);
 
         if (result.duplicated) {
-          await sendMessage(`⚠️ 既に登録済み：${data.name}`);
+          await sendMessage(`⚠️ 既に登録済みの可能性があります：${data.name || '名前不明'}`);
         } else {
-          await sendMessage(`✅ 登録しました：${data.name}`);
+          await sendMessage(`✅ 登録しました：${data.name || '名前不明'}`);
         }
 
         delete pendingData[userId];
@@ -261,13 +243,18 @@ app.post('/', async (req, res) => {
         await sendMessage('❌ 登録キャンセルしました');
         return;
       }
+
+      return;
     }
 
-    // 画像
     if (body.type !== 'message') return;
-    if (body.content?.type !== 'image') return;
+    if (body.content?.type !== 'image') {
+      console.log('⏭ 画像以外スキップ');
+      return;
+    }
 
     const fileId = body.content.fileId;
+    if (!fileId) throw new Error('fileId がありません');
 
     const fileInfo = await fetchImageBuffer(fileId);
     console.log(`✅ 画像取得成功: ${fileInfo.buffer.length} bytes`);
@@ -283,16 +270,28 @@ app.post('/', async (req, res) => {
     await sendMessage(
 `📋 内容確認
 
-名前：${data.name}
-会社：${data.company}
+名前：${data.name || ''}
+会社：${data.company || ''}
+部署：${data.department || ''}
+役職：${data.position || ''}
+電話：${data.phone || ''}
+携帯：${data.mobile || ''}
+メール：${data.email || ''}
+住所：${data.address || ''}
+メモ：${data.memo || ''}
 
-👉 OKで登録 / NGでキャンセル`
+👉 OK で登録 / NG でキャンセル`
     );
 
   } catch (e) {
     const body = decodeErrorBody(e.response?.data) || e.message;
     console.error('❌ エラー:', body);
-    await sendMessage('❌ エラーが発生しました');
+
+    try {
+      await sendMessage('❌ 処理中にエラーが発生しました');
+    } catch (e2) {
+      console.error('❌ 通知失敗:', e2.message);
+    }
   }
 });
 
@@ -300,6 +299,7 @@ app.get('/', (req, res) => {
   res.send('名刺管理くん稼働中');
 });
 
-app.listen(process.env.PORT || 10000, () => {
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
   console.log('🚀 Server started');
 });
