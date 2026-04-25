@@ -21,21 +21,19 @@ function escapeKintoneQueryValue(value) {
 }
 
 function cleanKey(value) {
-  return String(value || '')
-    .replace(/\s+/g, '')
-    .replace(/株式会社/g, '株式会社')
-    .trim();
+  return String(value || '').replace(/\s+/g, '').trim();
 }
 
 function buildDuplicateKey(data) {
   const company = cleanKey(data.company);
   const name = cleanKey(data.name);
-
   if (!company && !name) return '';
-
   return `${company}_${name}`;
 }
 
+// =======================
+// LINE WORKS TOKEN
+// =======================
 async function getAccessToken() {
   const now = Math.floor(Date.now() / 1000);
   const privateKey = (process.env.LW_PRIVATE_KEY || '')
@@ -57,7 +55,7 @@ async function getAccessToken() {
   params.append('client_id', process.env.LW_CLIENT_ID);
   params.append('client_secret', process.env.LW_CLIENT_SECRET);
   params.append('assertion', assertion);
-  params.append('scope', 'bot bot.message');
+  params.append('scope', 'bot bot.message user.profile.read');
 
   const res = await axios.post(
     'https://auth.worksmobile.com/oauth2/v2.0/token',
@@ -68,6 +66,39 @@ async function getAccessToken() {
   return res.data.access_token;
 }
 
+// =======================
+// LINE WORKS USER NAME
+// =======================
+async function getLineWorksUserName(userId) {
+  try {
+    const token = await getAccessToken();
+
+    const res = await axios.get(
+      `https://www.worksapis.com/v1.0/users/${userId}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      }
+    );
+
+    const userName = res.data.userName;
+
+    if (userName?.lastName || userName?.firstName) {
+      return `${userName.lastName || ''}${userName.firstName || ''}`;
+    }
+
+    return res.data.displayName || res.data.email || userId;
+
+  } catch (e) {
+    console.error('LINE WORKSユーザー取得失敗:', e.response?.data || e.message);
+    return userId;
+  }
+}
+
+// =======================
+// SEND MESSAGE
+// =======================
 async function sendMessage(text) {
   const token = await getAccessToken();
 
@@ -83,6 +114,9 @@ async function sendMessage(text) {
   );
 }
 
+// =======================
+// IMAGE FETCH
+// =======================
 async function fetchImageBuffer(fileId) {
   const token = await getAccessToken();
 
@@ -117,6 +151,9 @@ async function fetchImageBuffer(fileId) {
   throw new Error(`画像取得失敗: status=${first.status} body=${decodeErrorBody(first.data)}`);
 }
 
+// =======================
+// OCR
+// =======================
 async function analyzeBusinessCard(imageDataUrl) {
   const res = await axios.post(
     'https://api.openai.com/v1/responses',
@@ -177,6 +214,9 @@ async function analyzeBusinessCard(imageDataUrl) {
   return JSON.parse(cleaned);
 }
 
+// =======================
+// KINTONE FILE UPLOAD
+// =======================
 async function uploadFile(buffer, contentType) {
   const form = new FormData();
   const blob = new Blob([buffer], { type: contentType || 'image/jpeg' });
@@ -203,6 +243,9 @@ async function uploadFile(buffer, contentType) {
   return json.fileKey;
 }
 
+// =======================
+// DUPLICATE CHECK
+// =======================
 async function checkDuplicateCandidate(data) {
   const conditions = [];
 
@@ -225,10 +268,7 @@ async function checkDuplicateCandidate(data) {
   }
 
   if (!conditions.length) {
-    return {
-      duplicated: false,
-      note: ''
-    };
+    return { duplicated: false, note: '' };
   }
 
   const query = `${conditions.join(' or ')} order by $id desc limit 1`;
@@ -245,10 +285,7 @@ async function checkDuplicateCandidate(data) {
   );
 
   if (res.data.records.length === 0) {
-    return {
-      duplicated: false,
-      note: ''
-    };
+    return { duplicated: false, note: '' };
   }
 
   const r = res.data.records[0];
@@ -267,6 +304,9 @@ async function checkDuplicateCandidate(data) {
   };
 }
 
+// =======================
+// SEARCH
+// =======================
 async function searchBusinessCards(keyword) {
   const safe = escapeKintoneQueryValue(keyword);
 
@@ -321,6 +361,9 @@ function buildSearchResultMessage(records, keyword) {
   return msg.trim();
 }
 
+// =======================
+// REGISTER
+// =======================
 async function register(data, userId) {
   const duplicate = await checkDuplicateCandidate(data);
 
@@ -343,8 +386,10 @@ async function register(data, userId) {
   }
 
   if (process.env.KINTONE_OWNER_FIELD_CODE) {
+    const ownerName = await getLineWorksUserName(userId);
+
     record[process.env.KINTONE_OWNER_FIELD_CODE] = {
-      value: process.env.KINTONE_OWNER_VALUE || userId || ''
+      value: ownerName
     };
   }
 
@@ -398,6 +443,9 @@ async function register(data, userId) {
   };
 }
 
+// =======================
+// IMAGE HANDLE
+// =======================
 async function handleImage(body, userId) {
   const fileInfo = await fetchImageBuffer(body.content.fileId);
 
@@ -446,6 +494,9 @@ FAX：${data.fax || ''}
   );
 }
 
+// =======================
+// WEBHOOK
+// =======================
 app.post('/', async (req, res) => {
   res.sendStatus(200);
 
